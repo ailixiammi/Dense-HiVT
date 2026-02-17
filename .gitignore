@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Data & outputs
+data/
+outputs/
+
+# Artifacts
+*.ckpt
+*.pt
+*.pth
+*.npz
+
+# OS
+.DS_Store
