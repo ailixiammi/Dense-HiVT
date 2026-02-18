@@ -144,14 +144,16 @@ class CoordinateTransform:
 class AgentFeatureExtractor:
     """Agent 特征提取器"""
     
-    def __init__(self, config: GlobalConfig):
+    def __init__(self, config: GlobalConfig, am: ArgoverseMap):
         self.config = config
+        self.am = am
     
     def extract_features(self, 
                         df: pd.DataFrame,
                         timestamps: List[int],
                         origin: torch.Tensor,
-                        rotate_mat: torch.Tensor) -> Dict[str, torch.Tensor]:
+                        rotate_mat: torch.Tensor,
+                        theta: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         提取 Agent 的所有特征（使用双锚点筛选策略）
         
@@ -160,6 +162,7 @@ class AgentFeatureExtractor:
             timestamps: 时间戳列表（已排序）
             origin: [2] 原点坐标（全局，AV在t=19的位置）
             rotate_mat: [2, 2] 旋转矩阵
+            theta: AV 在 t=19 的朝向（弧度）
             
         Returns:
             包含所有 Agent 特征的字典
@@ -184,12 +187,16 @@ class AgentFeatureExtractor:
         actor_ids = self._apply_dual_anchor_filtering(df, df_obs, actor_ids, origin)
         num_agents = len(actor_ids)
         
+        # 获取城市名称
+        city = df_obs['CITY_NAME'].iloc[0]
+        
         # 初始化特征容器
         positions_global = torch.zeros(num_agents, self.config.TOTAL_STEPS, 2, dtype=torch.float32)
         history_mask = torch.zeros(num_agents, self.config.HISTORY_STEPS, dtype=torch.bool)
         future_mask = torch.zeros(num_agents, self.config.FUTURE_STEPS, dtype=torch.bool)
         agent_types = torch.full((num_agents,), -1, dtype=torch.long)
         is_target = torch.zeros(num_agents, dtype=torch.bool)
+        agent_headings = []  # 【新增】朝向列表
         
         # 遍历每个 Agent
         for idx, actor_id in enumerate(actor_ids):
@@ -216,6 +223,25 @@ class AgentFeatureExtractor:
                     history_mask[idx, t] = True
                 else:
                     future_mask[idx, t - self.config.HISTORY_STEPS] = True
+            
+            # 【优化】AV 直接复用外部传入的 robust theta
+            if object_type == 'AV':
+                agent_headings.append(theta.item())
+                continue
+            
+            # 【新增】计算当前 Agent 的朝向（在循环内部）
+            heading = self._compute_agent_heading(
+                actor_df=actor_df,
+                timestamps=timestamps,
+                positions_global=positions_global[idx],
+                history_mask=history_mask[idx],
+                city=city,
+                av_heading=theta
+            )
+            agent_headings.append(heading)
+        
+        # 转换朝向列表为 Tensor
+        agent_headings = torch.tensor(agent_headings, dtype=torch.float32)  # [N]
         
         # 坐标转换到局部坐标系
         positions_local = CoordinateTransform.transform_to_local(
@@ -245,8 +271,115 @@ class AgentFeatureExtractor:
             'agent_future_positions_mask': future_mask,
             'agent_type': agent_types,
             'agent_is_target': is_target,
+            'agent_heading': agent_headings,  # 【新增】
             'num_valid_agents': num_agents
         }
+    
+    def _compute_agent_heading(self,
+                              actor_df: pd.DataFrame,
+                              timestamps: List[int],
+                              positions_global: torch.Tensor,
+                              history_mask: torch.Tensor,
+                              city: str,
+                              av_heading: torch.Tensor) -> float:
+        """
+        计算单个 Agent 在 T=19 时刻的朝向
+        
+        策略：
+        1. 检查历史 20 帧的移动距离
+        2. 如果移动 > 0.1m: 使用几何差分
+        3. 如果静止: 查询最近车道切线方向
+        
+        Args:
+            actor_df: 该 Agent 的 DataFrame
+            timestamps: 时间戳列表
+            positions_global: [50, 2] 该 Agent 的全局轨迹
+            history_mask: [20] 该 Agent 的历史有效性 mask
+            city: 城市名称
+            av_heading: AV 的朝向（用于 fallback）
+            
+        Returns:
+            朝向角度（弧度）
+        """
+        import math
+        
+        EPSILON = 0.1  # 移动阈值（米）
+        OBS_TIMESTEP = self.config.OBS_TIMESTEP
+        
+        # Step 1: 提取历史轨迹（T=0~19）
+        history_positions = positions_global[:self.config.HISTORY_STEPS]  # [20, 2]
+        valid_positions = history_positions[history_mask]  # 只取有效点
+        
+        if len(valid_positions) < 2:
+            # 没有足够的点，返回 AV 朝向
+            return av_heading.item()
+        
+        # Step 2: 计算最大位移（轨迹包络）
+        max_displacement = (valid_positions.max(dim=0)[0] - 
+                           valid_positions.min(dim=0)[0]).norm().item()
+        
+        # Step 3: 判断运动 vs 静止
+        if max_displacement > EPSILON:
+            # 【运动物体】使用几何差分
+            # 尝试从 T=19 往前找最近的有效差分
+            for t in range(OBS_TIMESTEP, 0, -1):
+                if history_mask[t] and history_mask[t-1]:
+                    dx = positions_global[t, 0] - positions_global[t-1, 0]
+                    dy = positions_global[t, 1] - positions_global[t-1, 1]
+                    displacement = torch.sqrt(dx**2 + dy**2).item()
+                    if displacement > 1e-3:  # 避免除零
+                        return math.atan2(dy.item(), dx.item())
+            
+            # 如果 T=19 附近都静止，沿用更早的移动方向
+            for t in range(OBS_TIMESTEP-1, 0, -1):
+                if history_mask[t] and history_mask[t-1]:
+                    dx = positions_global[t, 0] - positions_global[t-1, 0]
+                    dy = positions_global[t, 1] - positions_global[t-1, 1]
+                    displacement = torch.sqrt(dx**2 + dy**2).item()
+                    if displacement > 1e-3:
+                        return math.atan2(dy.item(), dx.item())
+        
+        # 【静止物体】查询地图
+        # 获取 T=19 时刻的位置
+        if not history_mask[OBS_TIMESTEP]:
+            return av_heading.item()
+        
+        agent_x = positions_global[OBS_TIMESTEP, 0].item()
+        agent_y = positions_global[OBS_TIMESTEP, 1].item()
+        
+        try:
+            # 调用地图 API 查询附近车道
+            lane_ids = self.am.get_lane_ids_in_xy_bbox(
+                agent_x, agent_y, city, query_search_range_manhattan=5.0
+            )
+            
+            if len(lane_ids) > 0:
+                # 获取最近车道的中心线
+                centerline = self.am.get_lane_segment_centerline(
+                    lane_ids[0], city
+                )
+                
+                if centerline is not None and len(centerline) >= 2:
+                    # 找到最近点
+                    dists = np.linalg.norm(
+                        centerline[:, :2] - np.array([agent_x, agent_y]), 
+                        axis=1
+                    )
+                    nearest_idx = np.argmin(dists)
+                    
+                    # 计算切线方向（顺着车流）
+                    if nearest_idx < len(centerline) - 1:
+                        v = centerline[nearest_idx + 1, :2] - centerline[nearest_idx, :2]
+                    else:
+                        v = centerline[nearest_idx, :2] - centerline[nearest_idx - 1, :2]
+                    
+                    return math.atan2(v[1], v[0])
+        
+        except Exception:
+            pass
+        
+        # Fallback: 返回 AV 朝向
+        return av_heading.item()
     
     def _apply_dual_anchor_filtering(self,
                                      df: pd.DataFrame,
@@ -364,6 +497,7 @@ class AgentFeatureExtractor:
             'agent_future_positions_mask': torch.zeros(0, self.config.FUTURE_STEPS, dtype=torch.bool),
             'agent_type': torch.zeros(0, dtype=torch.long),
             'agent_is_target': torch.zeros(0, dtype=torch.bool),
+            'agent_heading': torch.zeros(0, dtype=torch.float32),  # 【新增】
             'num_valid_agents': 0
         }
     
@@ -417,6 +551,10 @@ class AgentFeatureExtractor:
                 torch.zeros(pad_size, self.config.FUTURE_STEPS, dtype=torch.bool)
             ], dim=0)
             
+            # 截断朝向
+            if 'agent_heading' in features:
+                features['agent_heading'] = features['agent_heading'][:max_agents]
+            
             # 填充类型（-1 表示 padding）
             features['agent_type'] = torch.cat([
                 features['agent_type'],
@@ -427,6 +565,12 @@ class AgentFeatureExtractor:
             features['agent_is_target'] = torch.cat([
                 features['agent_is_target'],
                 torch.zeros(pad_size, dtype=torch.bool)
+            ], dim=0)
+            
+            # 【新增】填充朝向（使用 0.0）
+            features['agent_heading'] = torch.cat([
+                features['agent_heading'],
+                torch.zeros(pad_size, dtype=torch.float32)
             ], dim=0)
         
         # 移除辅助键
@@ -725,12 +869,12 @@ class SceneProcessor:
     def __init__(self, config: GlobalConfig, am: ArgoverseMap):
         self.config = config
         self.am = am
-        self.agent_extractor = AgentFeatureExtractor(config)
+        self.agent_extractor = AgentFeatureExtractor(config, am)
         self.map_extractor = MapFeatureExtractor(config, am)
     
     def process_single_scene(self, csv_path: Path) -> Optional[Dict[str, torch.Tensor]]:
         """
-        处理单个场景
+        处理单个场景 - 逻辑重构版
         
         Args:
             csv_path: CSV 文件路径
@@ -751,17 +895,21 @@ class SceneProcessor:
             if len(timestamps) < self.config.TOTAL_STEPS:
                 return None
             
-            # 获取 AV 在 t=19 的位置和朝向
-            av_info = self._get_av_origin_and_heading(df, timestamps)
+            # 获取城市名称 (关键：计算 AV 朝向需要用到地图)
+            city = df['CITY_NAME'].iloc[0]
+            
+            av_info = self._get_robust_av_info(df, timestamps, city)
             if av_info is None:
                 return None
             
-            origin, theta = av_info
+            origin, theta = av_info  # theta 已经是经过地图校准的正确角度
+            
+            # 使用正确的 theta 构建旋转矩阵
             rotate_mat = CoordinateTransform.compute_rotation_matrix(theta)
             
             # 提取 Agent 特征
             agent_features = self.agent_extractor.extract_features(
-                df, timestamps, origin, rotate_mat
+                df, timestamps, origin, rotate_mat, theta
             )
             agent_features = self.agent_extractor.pad_to_max_agents(agent_features)
             
@@ -783,47 +931,116 @@ class SceneProcessor:
             
         except Exception as e:
             logging.warning(f"处理 {csv_path.name} 失败: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
-    def _get_av_origin_and_heading(self, 
-                                   df: pd.DataFrame, 
-                                   timestamps: List[int]) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    def _get_robust_av_info(self, 
+                            df: pd.DataFrame, 
+                            timestamps: List[int],
+                            city: str) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
         """
-        获取 AV 在 t=19 的位置和朝向
+        获取 AV 在 t=19 的位置和【鲁棒】朝向
+        包含：运动检测 + 地图回退策略
         
         Args:
             df: 场景 DataFrame
             timestamps: 时间戳列表
+            city: 城市名称
             
         Returns:
             (origin, theta) 或 None
         """
-        obs_timestamp = timestamps[self.config.OBS_TIMESTEP]
-        prev_timestamp = timestamps[self.config.OBS_TIMESTEP - 1]
+        import math
         
+        obs_timestamp = timestamps[self.config.OBS_TIMESTEP]
         av_df = df[df['OBJECT_TYPE'] == 'AV']
         
-        # 当前位置 (t=19)
+        # 1. 获取当前位置 (Origin)
         av_curr = av_df[av_df['TIMESTAMP'] == obs_timestamp]
         if len(av_curr) == 0:
             return None
-        
         av_curr = av_curr.iloc[0]
         origin = torch.tensor([av_curr['X'], av_curr['Y']], dtype=torch.float32)
         
-        # 前一时刻位置 (t=18)
-        av_prev = av_df[av_df['TIMESTAMP'] == prev_timestamp]
-        if len(av_prev) == 0:
-            return None
+        # 2. 计算鲁棒朝向 (Robust Theta)
+        # 提取历史轨迹 (0~19)
+        hist_timestamps = timestamps[:self.config.OBS_TIMESTEP+1]
+        av_hist = av_df[av_df['TIMESTAMP'].isin(hist_timestamps)]
         
-        av_prev = av_prev.iloc[0]
-        prev_pos = torch.tensor([av_prev['X'], av_prev['Y']], dtype=torch.float32)
+        valid_pos_list = []
+        for ts in hist_timestamps:
+            row = av_hist[av_hist['TIMESTAMP'] == ts]
+            if len(row) > 0:
+                valid_pos_list.append([row.iloc[0]['X'], row.iloc[0]['Y']])
         
-        # 计算朝向
-        heading_vector = origin - prev_pos
-        theta = torch.atan2(heading_vector[1], heading_vector[0])
+        if len(valid_pos_list) < 2:
+            return None  # 只有一帧数据，无法计算方向
+            
+        valid_pos = np.array(valid_pos_list)  # [T, 2]
         
-        return origin, theta
+        # --- 策略 A: 运动检测 ---
+        EPSILON = 0.1
+        # 计算最大位移
+        displacement = np.linalg.norm(valid_pos.max(axis=0) - valid_pos.min(axis=0))
+        
+        theta = 0.0
+        
+        if displacement > EPSILON:
+            # 只要动过，就用几何差分
+            # 倒序寻找最近的有效移动向量
+            found_moving = False
+            for i in range(len(valid_pos)-1, 0, -1):
+                p_curr = valid_pos[i]
+                p_prev = valid_pos[i-1]
+                dist = np.linalg.norm(p_curr - p_prev)
+                if dist > 1e-2:  # 1cm 的微动
+                    theta = math.atan2(p_curr[1] - p_prev[1], p_curr[0] - p_prev[0])
+                    found_moving = True
+                    break
+            
+            if not found_moving:
+                # 极其罕见的情况：累计位移大，但帧间位移都极小（漂移？）
+                # 这种情况下使用首尾差分
+                delta = valid_pos[-1] - valid_pos[0]
+                theta = math.atan2(delta[1], delta[0])
+
+        else:
+            # --- 策略 B: 地图回退 (Map Fallback) ---
+            # AV 完全静止，查询车道方向
+            try:
+                # 查询 Search Radius 内的车道
+                lane_ids = self.am.get_lane_ids_in_xy_bbox(
+                    origin[0].item(), origin[1].item(), city, query_search_range_manhattan=5.0
+                )
+                
+                if len(lane_ids) > 0:
+                    # 获取最近车道
+                    centerline = self.am.get_lane_segment_centerline(lane_ids[0], city)
+                    
+                    if centerline is not None and len(centerline) >= 2:
+                        # 找到最近点索引
+                        dists = np.linalg.norm(centerline[:, :2] - valid_pos[-1], axis=1)
+                        nearest_idx = np.argmin(dists)
+                        
+                        # 计算切线向量 (保证顺着索引方向)
+                        if nearest_idx < len(centerline) - 1:
+                            v = centerline[nearest_idx + 1, :2] - centerline[nearest_idx, :2]
+                        else:
+                            v = centerline[nearest_idx, :2] - centerline[nearest_idx - 1, :2]
+                        
+                        theta = math.atan2(v[1], v[0])
+                    else:
+                        theta = 0.0
+                else:
+                    # Off-road 且静止，给个默认值 0
+                    theta = 0.0
+                    
+            except Exception as e:
+                logging.debug(f"Map query failed for AV heading: {e}")
+                theta = 0.0
+
+        return origin, torch.tensor(theta, dtype=torch.float32)
     
     def save_to_pt(self, sample: Dict[str, torch.Tensor], output_path: Path) -> None:
         """保存为 .pt 文件"""
