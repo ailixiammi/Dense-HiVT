@@ -99,7 +99,7 @@ class DenseHiVTLoss(nn.Module):
         Returns:
             包含 reg_loss, cls_loss, total_loss 的字典
         """
-        B, N, K, F, _ = loc.shape  # B, N, 6, 30, 4
+        B, N, K, F_steps, _ = loc.shape  # B, N, 6, 30, 4
         
         # =====================================================================
         # 步骤 1: 坐标系转换（世界坐标 -> 局部坐标）
@@ -169,7 +169,7 @@ class DenseHiVTLoss(nn.Module):
         # 4.1 提取 Winner 模态的预测结果
         # 使用 gather 提取最优模态的轨迹
         # best_mode: [B, N] -> [B, N, 1, 1, 1] 以匹配 loc 的维度
-        best_mode_expanded = best_mode.view(B, N, 1, 1, 1).expand(B, N, 1, F, 4)  # [B, N, 1, 30, 4]
+        best_mode_expanded = best_mode.view(B, N, 1, 1, 1).expand(B, N, 1, F_steps, 4)  # [B, N, 1, 30, 4]
         
         # 从 loc 中提取 Winner 轨迹
         y_hat_winner = torch.gather(loc, dim=2, index=best_mode_expanded).squeeze(2)  # [B, N, 30, 4]
