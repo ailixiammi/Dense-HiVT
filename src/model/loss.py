@@ -158,7 +158,7 @@ class DenseHiVTLoss(nn.Module):
         #【极度关键：防梯度泄漏】标签必须是常数，必须调用 .detach() 切断计算图！
         # 否则分类 loss 会顺着 FDE 错误地去更新回归头的参数
         fde_detached = fde.detach()
-        pi_target = F.softmax(-fde, dim=-1)  # [B, N, 6]
+        pi_target = F.softmax(-fde_detached, dim=-1)  # [B, N, 6]
         
         # 3.2 计算软目标交叉熵
         cls_loss_unmasked = soft_target_cross_entropy_loss(pi, pi_target)  # [B, N]

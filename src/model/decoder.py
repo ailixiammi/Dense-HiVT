@@ -92,10 +92,13 @@ class MultimodalDecoder(nn.Module):
         # =====================================================================
         # 步骤 1: 类别注入（Late Fusion）
         # =====================================================================
+        # 将 agent_type 钳制到有效范围 [0, 2]，处理 padding 位置的 -1 值
+        agent_type_safe = torch.clamp(agent_type, min=0, max=self.num_classes - 1)
+        
         # 将 agent_type 转换为 One-Hot 编码
         # 注意：需要确保 agent_type 是 Long 类型
         agent_type_onehot = F.one_hot(
-            agent_type.long(), 
+            agent_type_safe.long(), 
             num_classes=self.num_classes
         ).float()  # [B, N, 3]
         

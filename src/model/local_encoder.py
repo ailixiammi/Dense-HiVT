@@ -118,15 +118,23 @@ class CustomMaskedMHA(nn.Module):
         score = score + attn_mask  # [B, 8, N, M]
         
         # =====================================================================
+        # 步骤 4.5: 防止极端数值进入 Softmax
+        # =====================================================================
+        # 限制 score 的数值范围，防止 inf/nan
+        score = torch.clamp(score, min=-1e9, max=1e9)
+        score = torch.nan_to_num(score, nan=0.0, posinf=1e9, neginf=-1e9)
+        
+        # =====================================================================
         # 步骤 5: Softmax 激活
         # =====================================================================
         attn_weight = F.softmax(score, dim=-1)  # [B, 8, N, M]
         
         # =====================================================================
-        # 步骤 6: 防 NaN 机制
+        # 步骤 6: 防 NaN 机制（增强版）
         # =====================================================================
         # 当某一行全是 -inf 时，softmax 会产生 NaN，需要替换为 0
-        attn_weight = torch.nan_to_num(attn_weight, nan=0.0)  # [B, 8, N, M]
+        # 同时处理可能的 inf 值
+        attn_weight = torch.nan_to_num(attn_weight, nan=0.0, posinf=0.0, neginf=0.0)
         
         # =====================================================================
         # 步骤 7: Dropout
@@ -357,6 +365,13 @@ class DenseTemporalEncoder(nn.Module):
         # =====================================================================
         output = last_state.reshape(B, N, D)  # [B, N, 128]
         
+        # =====================================================================
+        # 步骤 6: NaN 保护（处理全 padding 的 agent）
+        # =====================================================================
+        # 当某个 agent 的所有 20 帧历史都无效时，TransformerEncoder 会产生 NaN
+        # 这些 agent 后续会被 valid_mask 过滤，所以用 0 填充是安全的
+        output = torch.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return output
 
 
@@ -544,7 +559,7 @@ class LocalEncoder(nn.Module):
         # =====================================================================
         # Agent 节点初始化
         agent_features = self.agent_emb(agent_history_speed)  # [B, N, 20, 128]
-        
+
         # Lane 节点初始化
         lane_features = self.lane_emb(
             map_lane_positions,
@@ -562,7 +577,7 @@ class LocalEncoder(nn.Module):
             agent_history_mask,
             agent_features
         )  # [B, N, 20, 128]
-        
+
         # =====================================================================
         # 步骤 3: 时序压缩
         # =====================================================================
@@ -570,7 +585,7 @@ class LocalEncoder(nn.Module):
             agent_features,
             agent_history_mask
         )  # [B, N, 128]
-        
+
         # =====================================================================
         # 步骤 4: AL 交互
         # =====================================================================

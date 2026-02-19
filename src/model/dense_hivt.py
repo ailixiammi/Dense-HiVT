@@ -133,7 +133,7 @@ class DenseHiVT(nn.Module):
         map_is_intersection = data['map_is_intersection']          # [B, L]
         map_turn_direction = data['map_turn_direction']            # [B, L]
         map_traffic_control = data['map_traffic_control']          # [B, L]
-        map_lane_mask = data['map_lane_positions_mask']            # [B, L]
+        map_lane_mask = data['map_lane_positions_mask'].any(dim=-1)# [B, L]
         
         # =====================================================================
         # 步骤 2: Local Encoder - 提取局部时序特征
@@ -150,7 +150,7 @@ class DenseHiVT(nn.Module):
             map_traffic_control=map_traffic_control,
             map_lane_mask=map_lane_mask
         )  # Shape: [B, N, 128]
-        
+
         # =====================================================================
         # 步骤 3: 提取当前时刻状态（t=19，即最后一个历史帧）
         # =====================================================================

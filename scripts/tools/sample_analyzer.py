@@ -46,13 +46,13 @@ agent_future_positions_mask = sample['agent_future_positions_mask'] # shape [64,
 #print(f"agent_future_positions_mask:{agent_future_positions_mask[0]}")
 
 agent_type = sample['agent_type']   # shape [64]
-#print(f"agent_type:{agent_type}")
+print(f"agent_type:{agent_type}")
 
 agent_is_target = sample['agent_is_target'] # shape [64]
 #print(f"agent_is_target:{agent_is_target}")
 
 agent_heading = sample['agent_heading'] # shape [64]
-print(f"agent_heading:{agent_heading}")
+#print(f"agent_heading:{agent_heading}")
 
 map_lane_positions = sample['map_lane_positions']   # shap [256, 10, 2]e
 #print(f"map_lane_positions:{map_lane_positions}")

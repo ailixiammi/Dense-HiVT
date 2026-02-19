@@ -30,7 +30,7 @@ sys.path.insert(0, str(project_root))
 
 from src.model.dense_hivt import DenseHiVT
 from src.model.loss import DenseHiVTLoss
-from src.data.dense_dataset import create_dataloaders
+from src.dataloader.dense_dataset import create_dataloaders
 from src.trainer.metrics import compute_metrics
 
 
@@ -494,7 +494,7 @@ def parse_args():
     # 训练超参数
     # =========================================================================
     parser.add_argument('--epochs', type=int, default=64, help='总训练 Epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='训练 Batch Size')
+    parser.add_argument('--batch_size', type=int, default=64, help='训练 Batch Size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Base Learning Rate')
     parser.add_argument('--lr_min', type=float, default=1e-6, help='最小学习率（CosineAnnealing）')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight Decay (AdamW)')
