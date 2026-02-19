@@ -31,7 +31,7 @@ sys.path.insert(0, str(project_root))
 from src.model.dense_hivt import DenseHiVT
 from src.model.loss import DenseHiVTLoss
 from src.data.dense_dataset import create_dataloaders
-from src.utils.metrics import compute_metrics
+from src.trainer.metrics import compute_metrics
 
 
 class TrainingEngine:
@@ -77,12 +77,10 @@ class TrainingEngine:
         self.model = DenseHiVT(
             embed_dim=args.embed_dim,
             num_heads=args.num_heads,
-            num_local_encoder_layers=args.num_local_encoder_layers,
-            num_global_interactor_layers=args.num_global_interactor_layers,
-            num_decoder_layers=args.num_decoder_layers,
-            dropout=args.dropout,
+            global_layers=args.num_global_interactor_layers,
             num_modes=args.num_modes,
-            future_steps=args.future_steps
+            future_steps=args.future_steps,
+            dropout=args.dropout
         ).to(self.device)
         
         print(f"模型已加载到设备: {self.device}")
@@ -523,7 +521,7 @@ def main():
     # 打印启动信息
     print()
     print("=" * 80)
-    print("Dense-HiVT 训练引擎".center(80))
+    print("Dense-HiVT 极速训练引擎".center(80))
     print("=" * 80)
     print()
     

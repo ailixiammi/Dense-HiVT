@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 from typing import Tuple
 
-from utils.geometry import get_local_geometry_and_mask
-from model.embedding import SingleInputEmbedding
-from model.local_encoder import CustomMaskedMHA
+from ..utils.geometry import get_local_geometry_and_mask
+from .embedding import SingleInputEmbedding
+from .local_encoder import CustomMaskedMHA
 
 
 class GlobalRelativePositionEmbedding(nn.Module):

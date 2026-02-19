@@ -120,8 +120,12 @@ class DenseHiVT(nn.Module):
         # Agent 历史特征
         agent_history_positions = data['agent_history_positions']  # [B, N, 20, 2]
         agent_history_speed = data['agent_history_speed']          # [B, N, 20, 2]
-        agent_history_heading = data['agent_history_heading']      # [B, N, 20]
-        agent_history_mask = data['agent_history_mask']            # [B, N, 20]
+        
+        # 从当前朝向扩展为历史序列（假设恒定朝向）
+        agent_current_heading_single = data['agent_heading']  # [B, N]
+        agent_history_heading = agent_current_heading_single.unsqueeze(-1).expand(-1, -1, 20)  # [B, N, 20]
+        
+        agent_history_mask = data['agent_history_positions_mask']  # [B, N, 20]
         agent_type = data['agent_type']                            # [B, N]
         
         # Lane 地图特征
@@ -129,7 +133,7 @@ class DenseHiVT(nn.Module):
         map_is_intersection = data['map_is_intersection']          # [B, L]
         map_turn_direction = data['map_turn_direction']            # [B, L]
         map_traffic_control = data['map_traffic_control']          # [B, L]
-        map_lane_mask = data['map_lane_mask']                      # [B, L]
+        map_lane_mask = data['map_lane_positions_mask']            # [B, L]
         
         # =====================================================================
         # 步骤 2: Local Encoder - 提取局部时序特征
@@ -152,7 +156,7 @@ class DenseHiVT(nn.Module):
         # =====================================================================
         # 全局交互器需要当前时刻的位置、朝向和掩码来计算相对位置编码
         agent_current_pos = agent_history_positions[:, :, -1, :]  # Shape: [B, N, 2]
-        agent_current_heading = agent_history_heading[:, :, -1]    # Shape: [B, N]
+        agent_current_heading = agent_current_heading_single       # Shape: [B, N] (直接使用原始朝向)
         agent_current_mask = agent_history_mask[:, :, -1]          # Shape: [B, N]
         
         # =====================================================================

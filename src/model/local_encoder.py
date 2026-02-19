@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from typing import Tuple
 import math
 
-from model.embedding import AgentNodeEmbedding, LaneNodeEmbedding, RelativePositionEmbedding
-from utils.geometry import get_local_geometry_and_mask
+from .embedding import AgentNodeEmbedding, LaneNodeEmbedding, RelativePositionEmbedding
+from ..utils.geometry import get_local_geometry_and_mask
 
 
 class CustomMaskedMHA(nn.Module):
