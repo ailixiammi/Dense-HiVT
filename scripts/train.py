@@ -97,11 +97,27 @@ class TrainingEngine:
             weight_decay=args.weight_decay
         )
         
-        # 初始化学习率调度器
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # 初始化学习率调度器（Warmup + Cosine）
+        # 阶段一：Warmup - 从极小学习率线性增长到 Base LR
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             self.optimizer,
-            T_max=args.epochs,
+            start_factor=0.01,  # 从 0.01 * lr (即 5e-6) 开始
+            end_factor=1.0,     # 增长到 1.0 * lr (即 5e-4)
+            total_iters=args.warmup_epochs
+        )
+        
+        # 阶段二：Cosine Annealing - 从 Base LR 衰减到 Min LR
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=args.epochs - args.warmup_epochs,
             eta_min=args.lr_min
+        )
+        
+        # 串联两个调度器
+        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[args.warmup_epochs]
         )
         
         # 初始化 GradScaler (AMP)
@@ -264,14 +280,15 @@ class TrainingEngine:
                 outputs = self.model(batch)
             
             # ===================================================================
-            # 步骤 3: 提取预测轨迹位置 (忽略尺度参数)
+            # 步骤 3: 提取预测轨迹位置
             # ===================================================================
             # outputs['loc']: [B, N, K, F, 4] (最后一维: [μ_x, μ_y, b_x, b_y])
-            # 我们只需要位置预测: [B, N, K, F, 2]
+            # 提取位置预测（局部坐标系）: [B, N, K, F, 2]
+            # 注意：预测和GT都在局部坐标系中，无需转换！
             pred_trajs = outputs['loc'][..., :2]  # [B, N, K, F, 2]
             
             # ===================================================================
-            # 步骤 4: 计算评测指标
+            # 步骤 4: 计算评测指标（使用局部坐标系）
             # ===================================================================
             metrics = compute_metrics(
                 pred_trajs=pred_trajs,
@@ -356,6 +373,8 @@ class TrainingEngine:
         print(f"训练集大小: {len(train_loader.dataset)} 样本")
         print(f"验证集大小: {len(val_loader.dataset)} 样本")
         print(f"Base LR: {self.args.lr}")
+        print(f"Warmup Epochs: {self.args.warmup_epochs} (从 {self.args.lr * 0.01:.2e} 增长到 {self.args.lr:.2e})")
+        print(f"Min LR: {self.args.lr_min}")
         print(f"Weight Decay: {self.args.weight_decay}")
         print(f"Gradient Clip Norm: {self.args.grad_clip_norm}")
         print(f"AMP 启用: {self.args.use_amp}")
@@ -495,8 +514,9 @@ def parse_args():
     # =========================================================================
     parser.add_argument('--epochs', type=int, default=64, help='总训练 Epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='训练 Batch Size')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Base Learning Rate')
+    parser.add_argument('--lr', type=float, default=5e-4, help='Base Learning Rate')
     parser.add_argument('--lr_min', type=float, default=1e-6, help='最小学习率（CosineAnnealing）')
+    parser.add_argument('--warmup_epochs', type=int, default=5, help='Warmup Epochs（学习率预热）')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight Decay (AdamW)')
     parser.add_argument('--grad_clip_norm', type=float, default=5.0, help='梯度裁剪阈值')
     parser.add_argument('--use_amp', action='store_true', default=True, help='使用 AMP（自动混合精度）')

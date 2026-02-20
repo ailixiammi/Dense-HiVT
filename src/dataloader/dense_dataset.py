@@ -86,6 +86,31 @@ class DenseHiVTDataset(Dataset):
         # 实时加载单个 .pt 文件（惰性加载）
         data = torch.load(self.file_paths[idx], weights_only=False)
         
+        # =====================================================================
+        # 物理清除带毒的 Padding 节点，防止 FP16 平方运算溢出产生 NaN
+        # =====================================================================
+        # 问题根因：
+        # 1. Padding 的 Agent 可能包含极端坐标值（如 -1765, 836）
+        # 2. Loss/Metrics 计算距离平方时：1667² + 831² ≈ 3,468,700
+        # 3. FP16 最大值仅 65504，超过后变成 Inf
+        # 4. Inf × 0.0 (mask) = NaN，导致梯度崩溃
+        # 
+        # 解决方案：在数据加载阶段将无效位置清零，从根源避免溢出
+        
+        # 净化未来轨迹
+        if 'agent_future_positions' in data and 'agent_future_positions_mask' in data:
+            future_mask = data['agent_future_positions_mask']  # [N, 30]
+            # 扩展 mask 以匹配坐标维度 [N, 30, 2]
+            future_mask_expanded = future_mask.unsqueeze(-1).expand_as(data['agent_future_positions'])
+            # 将 False 的位置强行赋 0
+            data['agent_future_positions'] = data['agent_future_positions'].masked_fill(~future_mask_expanded, 0.0)
+
+        # 净化历史轨迹
+        if 'agent_history_positions' in data and 'agent_history_positions_mask' in data:
+            history_mask = data['agent_history_positions_mask']  # [N, 20]
+            history_mask_expanded = history_mask.unsqueeze(-1).expand_as(data['agent_history_positions'])
+            data['agent_history_positions'] = data['agent_history_positions'].masked_fill(~history_mask_expanded, 0.0)
+        
         return data
 
 
