@@ -48,6 +48,7 @@
     'agent_future_positions_mask': Tensor[64, 30],      # 未来mask
     'agent_type': Tensor[64],                           # Agent类型
     'agent_is_target': Tensor[64],                      # 是否为目标
+    'agent_heading': Tensor[64],                        # T=19时刻朝向(弧度)
     
     # ===== Map 特征 =====
     'map_lane_positions': Tensor[256, 10, 2],           # Lane点坐标
@@ -57,7 +58,7 @@
     'map_traffic_control': Tensor[256],                 # 交通控制
     
     # ===== Meta 信息 =====
-    'origin': Tensor[2],                                # 原点 (全局坐标)
+    'origin': Tensor[2],                                # AV原点 (全局坐标)
     'theta': Tensor[1]                                  # 旋转角度
 }
 ```
@@ -137,6 +138,46 @@ python scripts/preprocess_offline.py \
     --output_dir /root/vc/data/train/processed_dense \
     --map_dir /root/vc/data/maps
 ```
+
+## 🔧 配套工具
+
+以下工具位于 `scripts/tools/` 目录,用于数据分析和维度参数选择:
+
+### 数据统计工具
+
+**analyze_agent_stats.py** - Agent数量分布统计
+- 用途: 分析每场景的Agent数量、类型分布、空间分布,帮助确定 `--max_agents` 参数
+- 用法: `python scripts/tools/analyze_agent_stats.py --data_dir /path/to/data --sample_size 3000`
+
+**analyze_map_stats.py** - 地图特征统计  
+- 用途: 分析Lane数量、点数分布,帮助确定 `--max_lanes` 和 `--max_points` 参数
+- 用法: `python scripts/tools/analyze_map_stats.py --data_dir /path/to/data --map_dir /path/to/maps --sample_size 500`
+
+**analyze_stationary_av.py** - 静止AV检测
+- 用途: 检测AV静止不动的场景,用于数据质量分析
+- 用法: `python scripts/tools/analyze_stationary_av.py --data_dir /path/to/data --sample_size 1000`
+
+### 诊断和分析工具
+
+**diagnose_jitter.py** - 坐标变换诊断
+- 用途: 对比原始CSV和处理后的.pt文件,诊断坐标变换是否有抖动问题
+- 用法: `python scripts/tools/diagnose_jitter.py --sample_id 12345 --csv_dir /path/to/csv --pt_dir /path/to/pt`
+
+**sample_analyzer.py** - 样本详细分析
+- 用途: 分析单个.pt样本的所有特征维度、统计量和有效性
+- 用法: `python scripts/tools/sample_analyzer.py --pt_file /path/to/sample.pt`
+
+### 可视化工具
+
+**visualize.py** - 静态场景可视化
+- 用途: 批量生成场景的静态图片(Agent轨迹+地图),保存为PDF
+- 用法: `python scripts/tools/visualize.py --data_dir /path/to/processed --output_dir /path/to/images --num_samples 20`
+
+**visualize_interactive.py** - 交互式可视化
+- 用途: 使用Plotly生成交互式HTML可视化,支持缩放、平移、悬停查看详情
+- 用法: `python scripts/tools/visualize_interactive.py --data_dir /path/to/processed --output output.html`
+
+> **提示**: 建议在确定预处理参数前,先运行 `analyze_agent_stats.py` 和 `analyze_map_stats.py` 获取数据分布统计。
 
 ## 📁 输出目录结构
 
@@ -268,7 +309,7 @@ python scripts/preprocess_offline.py \
 ### Q4: 如何选择合适的维度参数？
 
 **建议：**
-1. 先运行数据统计脚本（如 `analyze_argoverse_stats.py`）
+1. 先运行数据统计脚本（如 `analyze_agent_stats.py`）
 2. 根据 95% 或 99% 分位数设置 `--max_agents` 和 `--max_lanes`
 3. 根据 Lane 点数分布设置 `--max_points`
 
