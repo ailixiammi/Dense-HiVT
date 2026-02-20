@@ -56,15 +56,22 @@ class TrainingEngine:
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # 创建输出目录
-        self.output_dir = Path(args.output_dir)
+        # 获取项目根目录的绝对路径 (train.py 在 scripts/ 下，往上一级就是根目录)
+        project_root = Path(__file__).resolve().parent.parent
+        
+        # 强制将输出目录绑定在项目根目录下
+        self.output_dir = project_root / args.output_dir
+        
+        # 添加时间戳，每次运行隔离日志（避免覆盖，方便对比实验）
+        run_id = time.strftime("%Y%m%d_%H%M%S")
+        
         self.checkpoint_dir = self.output_dir / "checkpoints"
-        self.log_dir = self.output_dir / "logs"
+        self.log_dir = self.output_dir / "logs" / f"run_{run_id}"
         
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
-        # 初始化 TensorBoard
+        # 初始化 TensorBoard   
         self.writer = SummaryWriter(log_dir=str(self.log_dir))
         
         # 初始化模型
@@ -218,7 +225,7 @@ class TrainingEngine:
                 'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
             })
             
-            # TensorBoard 记录 (每 100 步)
+            # TensorBoard 记录
             if self.global_step % 100 == 0:
                 self.writer.add_scalar('Train/Loss', loss.item(), self.global_step)
                 self.writer.add_scalar('Train/RegLoss', loss_dict['reg_loss'].item(), self.global_step)
@@ -519,7 +526,7 @@ def parse_args():
     parser.add_argument('--warmup_epochs', type=int, default=5, help='Warmup Epochs（学习率预热）')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight Decay (AdamW)')
     parser.add_argument('--grad_clip_norm', type=float, default=5.0, help='梯度裁剪阈值')
-    parser.add_argument('--use_amp', action='store_true', default=True, help='使用 AMP（自动混合精度）')
+    parser.add_argument('--use_amp', type=lambda x: x.lower() == 'true', default=True, help='使用 AMP（自动混合精度）')
     
     # =========================================================================
     # DataLoader 配置
