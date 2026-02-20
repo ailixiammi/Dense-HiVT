@@ -27,8 +27,11 @@ def laplace_nll_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     mu = pred[..., :2]  # [..., 2]
     b = pred[..., 2:]   # [..., 2]
     
-    # 计算 Laplace NLL: |y - μ| / b + log(2b)
-    nll = torch.abs(target - mu) / b + torch.log(2 * b)  # [..., 2]
+    # 强制截断尺度参数，防止过小导致梯度爆炸
+    b = torch.clamp(b, min=1e-3)
+    
+    # 除法和 log 都加入安全垫，防止数值不稳定
+    nll = torch.abs(target - mu) / (b + 1e-5) + torch.log(2 * b + 1e-6)  # [..., 2]
     
     # 在最后一维求和（x 和 y 方向的损失相加）
     nll = nll.sum(dim=-1)  # [...]
@@ -104,32 +107,6 @@ class DenseHiVTLoss(nn.Module):
         # =====================================================================
         # 步骤 1: 坐标系转换（世界坐标 -> 局部坐标）
         # =====================================================================
-        # 1.1 计算相对坐标
-        rel_y = y - agent_current_pos.unsqueeze(2)  # [B, N, 30, 2]
-        
-        # 1.2 计算旋转角度的负值（从全局转到局部）
-        theta = -agent_current_heading  # [B, N]
-        
-        # 1.3 构建二维旋转矩阵 R
-        # R = [[cos(θ), -sin(θ)],
-        #      [sin(θ),  cos(θ)]]
-        cos_theta = torch.cos(theta)  # [B, N]
-        sin_theta = torch.sin(theta)  # [B, N]
-        
-        # 构建旋转矩阵: [B, N, 2, 2]
-        R = torch.stack([
-            torch.stack([cos_theta, -sin_theta], dim=-1),  # 第一行
-            torch.stack([sin_theta, cos_theta], dim=-1)    # 第二行
-        ], dim=-2)  # [B, N, 2, 2]
-        
-        # 1.4 应用旋转矩阵
-        # rel_y: [B, N, 30, 2] -> [B, N, 30, 2, 1]
-        # R: [B, N, 2, 2] -> [B, N, 1, 2, 2]
-        # 结果: [B, N, 30, 2, 1] -> [B, N, 30, 2]
-        y_local = torch.matmul(
-            R.unsqueeze(2),           # [B, N, 1, 2, 2]
-            rel_y.unsqueeze(-1)       # [B, N, 30, 2, 1]
-        ).squeeze(-1)  # [B, N, 30, 2]
         
         # =====================================================================
         # 步骤 2: 挑选 Winner 模态（Winner-Takes-All）
@@ -138,11 +115,13 @@ class DenseHiVTLoss(nn.Module):
         loc_pos = loc[..., :2]  # [B, N, 6, 30, 2]
         
         # 2.2 计算 L2 距离
-        # 扩展 y_local 维度以支持广播: [B, N, 30, 2] -> [B, N, 1, 30, 2]
-        y_local_expanded = y_local.unsqueeze(2)  # [B, N, 1, 30, 2]
+        # 扩展 y 维度以支持广播: [B, N, 30, 2] -> [B, N, 1, 30, 2]
+        y_expanded = y.unsqueeze(2)  # [B, N, 1, 30, 2]
         
-        # 计算 L2 距离
-        l2_norm = torch.norm(loc_pos - y_local_expanded, p=2, dim=-1)  # [B, N, 6, 30]
+        # 手动展开 L2 范数计算并加入安全垫，防止求导时除零
+        # 原始的 torch.norm 在 (0,0) 点求导会导致梯度爆炸
+        diff = loc_pos - y_expanded  # [B, N, 6, 30, 2]
+        l2_norm = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-6)  # [B, N, 6, 30]
         
         # 2.3 提取 FDE（最后一帧 t=29 的误差）
         fde = l2_norm[..., -1]  # [B, N, 6]
@@ -174,8 +153,9 @@ class DenseHiVTLoss(nn.Module):
         # 从 loc 中提取 Winner 轨迹
         y_hat_winner = torch.gather(loc, dim=2, index=best_mode_expanded).squeeze(2)  # [B, N, 30, 4]
         
-        # 4.2 计算 Laplace NLL 损失
-        reg_loss_per_frame = laplace_nll_loss(y_hat_winner, y_local)  # [B, N, 30]
+        # 4.2 计算 Laplace NLL Loss（包含均值和方差预测）
+        # 安全保护已在 laplace_nll_loss 函数内部实现
+        reg_loss_per_frame = laplace_nll_loss(y_hat_winner, y)  # [B, N, 30]
         
         # 4.3 应用时间掩码并计算平均损失
         # 将 reg_mask 转换为 float 类型
@@ -184,8 +164,8 @@ class DenseHiVTLoss(nn.Module):
         # 计算有效帧的损失总和
         reg_loss_sum = (reg_loss_per_frame * reg_mask_float).sum(dim=-1)  # [B, N]
         
-        # 计算有效帧数
-        valid_frames = reg_mask_float.sum(dim=-1).clamp(min=1)  # [B, N]
+        # 计算有效帧数，加入 epsilon 防止除零
+        valid_frames = reg_mask_float.sum(dim=-1) + 1e-5  # [B, N]
         
         # 计算每个 Agent 的平均损失
         reg_loss_unmasked = reg_loss_sum / valid_frames  # [B, N]
@@ -196,8 +176,8 @@ class DenseHiVTLoss(nn.Module):
         # 5.1 将 valid_mask 转换为 float 类型
         valid_mask_float = valid_mask.float()  # [B, N]
         
-        # 5.2 计算有效 Agent 的数量
-        num_valid_agents = valid_mask_float.sum().clamp(min=1)  # 标量
+        # 计算有效 Agent 的数量，加入 epsilon 防止除零
+        num_valid_agents = valid_mask_float.sum() + 1e-5  # 标量
         
         # 5.3 过滤并计算最终的回归损失
         reg_loss = (reg_loss_unmasked * valid_mask_float).sum() / num_valid_agents

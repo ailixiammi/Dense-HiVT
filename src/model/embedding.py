@@ -213,11 +213,11 @@ class LaneNodeEmbedding(nn.Module):
         # =====================================================================
         # 步骤 2: L2 归一化
         # =====================================================================
-        # 计算每个向量的 L2 范数
-        norms = torch.norm(direction_vectors, p=2, dim=-1, keepdim=True)  # [B, L, 9, 1]
+        # 计算每个向量的 L2 范数（展开并加安全垫，防止 sqrt(0) 导致梯度 NaN）
+        norms = torch.sqrt(torch.sum(direction_vectors**2, dim=-1, keepdim=True) + 1e-6)  # [B, L, 9, 1]
         
-        # 归一化（避免除零）
-        direction_vectors_normalized = direction_vectors / (norms + 1e-8)  # [B, L, 9, 2]
+        # 归一化（norms 已经有安全垫，无需再加）
+        direction_vectors_normalized = direction_vectors / norms  # [B, L, 9, 2]
         
         # =====================================================================
         # 步骤 3: 离散特征广播到序列维度（确保类型为 torch.long）

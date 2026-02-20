@@ -12,6 +12,38 @@ import math
 from .embedding import AgentNodeEmbedding, LaneNodeEmbedding, RelativePositionEmbedding
 from ..utils.geometry import get_local_geometry_and_mask
 
+def sanitize_padding_mask(mask_tensor, is_pytorch_style=False):
+    """
+    防止 Attention 出现整行为空导致的 Backward NaN。
+    
+    Args:
+        mask_tensor: 掩码张量 [B, N] 或 [B, N_query, N_key]
+        is_pytorch_style: 
+            - True: PyTorch 原生风格（True=忽略, False=保留）
+            - False: 自定义风格（True=有效, False=无效）
+    
+    Returns:
+        净化后的掩码张量
+    """
+    if mask_tensor is None:
+        return None
+    
+    # 克隆防止原地修改
+    safe_mask = mask_tensor.clone()
+    
+    if is_pytorch_style:
+        # PyTorch 原生风格：如果一整行全是 True（全被忽略），强行把第 0 个设为 False（保留）
+        all_masked_rows = safe_mask.all(dim=-1)
+        if all_masked_rows.any():
+            safe_mask[all_masked_rows, 0] = False
+    else:
+        # 自定义风格：如果一整行全是 False（全无效），强行把第 0 个设为 True（有效）
+        all_masked_rows = ~(safe_mask.any(dim=-1))
+        if all_masked_rows.any():
+            safe_mask[all_masked_rows, 0] = True
+    
+    return safe_mask
+
 
 class CustomMaskedMHA(nn.Module):
     """
@@ -118,7 +150,21 @@ class CustomMaskedMHA(nn.Module):
         score = score + attn_mask  # [B, 8, N, M]
         
         # =====================================================================
-        # 步骤 4.5: 防止极端数值进入 Softmax
+        # 步骤 4.5: 预防性修复全虚空掩码行（防止 Softmax 产生 NaN）
+        # =====================================================================
+        # 检查哪些 Query 行的所有 Key 都被掩码为 -inf（全屏蔽状态）
+        # 这会导致 Softmax 输出 NaN，进而在反向传播时产生 NaN 梯度
+        all_masked_rows = (score == float('-inf')).all(dim=-1)  # [B, 8, N]
+        
+        # 对于全屏蔽的行，强制解禁第 0 个 Key 位置
+        # 使用高级索引将全屏蔽行的第 0 列设为 0
+        if all_masked_rows.any():
+            score = score.clone()  # 创建副本避免原地修改
+            batch_idx, head_idx, query_idx = torch.where(all_masked_rows)
+            score[batch_idx, head_idx, query_idx, 0] = 0.0
+        
+        # =====================================================================
+        # 步骤 4.6: 防止极端数值进入 Softmax
         # =====================================================================
         # 限制 score 的数值范围，防止 inf/nan
         score = torch.clamp(score, min=-1e9, max=1e9)
@@ -229,6 +275,11 @@ class DenseAAEncoder(nn.Module):
         heading_flat = agent_history_heading.transpose(1, 2).reshape(B * T, N)    # [B*20, N]
         mask_flat = agent_history_mask.transpose(1, 2).reshape(B * T, N)          # [B*20, N]
         features_flat = agent_features.transpose(1, 2).reshape(B * T, N, 128)     # [B*20, N, 128]
+        
+        # =====================================================================
+        # 步骤 1.5:净化掩码，防止全 False 行
+        # =====================================================================
+        mask_flat = sanitize_padding_mask(mask_flat, is_pytorch_style=False)
         
         # =====================================================================
         # 步骤 2: 计算局部几何和掩码
@@ -346,6 +397,9 @@ class DenseTemporalEncoder(nn.Module):
         # 我们的 mask 是 True=有效，所以需要取反
         padding_mask = ~mask_flat  # [B*N, 20]
         
+        # 净化掩码：防止全 True 行（全无效）导致 NaN
+        padding_mask = sanitize_padding_mask(padding_mask, is_pytorch_style=True)
+        
         # =====================================================================
         # 步骤 3: 传入 Transformer Encoder
         # =====================================================================
@@ -434,6 +488,11 @@ class DenseALEncoder(nn.Module):
         Returns:
             融合后的智能体特征，Shape [B, N, 128]
         """
+        # =====================================================================
+        # 步骤 0.5:净化 Lane 掩码，防止全 False 行
+        # =====================================================================
+        lane_mask = sanitize_padding_mask(lane_mask, is_pytorch_style=False)
+        
         # =====================================================================
         # 步骤 1: 计算局部几何和掩码
         # =====================================================================
