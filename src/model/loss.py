@@ -105,7 +105,8 @@ class DenseHiVTLoss(nn.Module):
         B, N, K, F_steps, _ = loc.shape  # B, N, 6, 30, 4
         
         # =====================================================================
-        # 步骤 1: 坐标系转换（世界坐标 -> 局部坐标）
+        # 注意：y 已经在预处理时转换到局部坐标系，无需再次转换！
+        # 局部坐标系定义：以 AV 在 t=19 的位置为原点，朝向为 x 轴正方向
         # =====================================================================
         
         # =====================================================================
@@ -131,16 +132,21 @@ class DenseHiVTLoss(nn.Module):
         
         # =====================================================================
         # 步骤 3: 计算分类损失
-        # =====================================================================
-        # 3.1 基于 FDE 生成软标签
-        # 使用 Softmax(-FDE) 将距离转换为概率分布
-        #【极度关键：防梯度泄漏】标签必须是常数，必须调用 .detach() 切断计算图！
-        # 否则分类 loss 会顺着 FDE 错误地去更新回归头的参数
-        fde_detached = fde.detach()
-        pi_target = F.softmax(-fde_detached, dim=-1)  # [B, N, 6]
+        # =====================================================================        
+        # 计算 Hard Label 交叉熵
+        # F.cross_entropy 要求输入格式：
+        #   - input: [B, C, *] 或 [B, C] where C = num_classes
+        #   - target: [B, *] or [B] containing class indices
+        # 当前 pi shape: [B, N, 6]，需要转置为 [B, 6, N]
+        # 当前 best_mode shape: [B, N]，无需修改
+        pi_transposed = pi.transpose(1, 2)  # [B, 6, N]
         
-        # 3.2 计算软目标交叉熵
-        cls_loss_unmasked = soft_target_cross_entropy_loss(pi, pi_target)  # [B, N]
+        # 计算标准交叉熵（内部自动执行 log_softmax，数值稳定性最优）
+        cls_loss_unmasked = F.cross_entropy(
+            pi_transposed,      # [B, 6, N]
+            best_mode,          # [B, N]
+            reduction='none'    # 返回 [B, N]，保留每个 Agent 的独立损失
+        )  # [B, N]
         
         # =====================================================================
         # 步骤 4: 计算回归损失
